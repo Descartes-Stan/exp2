@@ -351,6 +351,9 @@ class KGAT(KnowledgeRecommender):
 
         ui_cts_loss = self.cts_loss(u_embeddings, pos_embeddings, temp=1.0,
                                                         batch_size=u_embeddings.shape[0])
+        
+        ui_cts_loss_2 = self.cts_loss_2(u_embeddings, pos_embeddings, temp=1.0,
+                                                        batch_size=u_embeddings.shape[0])
 
 
 #        cts_loss_1 = self.cts_loss(cts_embedding, cts_embedding_1, temp=0.1,
@@ -370,7 +373,7 @@ class KGAT(KnowledgeRecommender):
         mf_loss = self.mf_loss(pos_scores, neg_scores)
         reg_loss = self.reg_loss(u_embeddings, pos_embeddings, neg_embeddings)
 #        print("cts_loss:", cts_loss, e_cts_loss, ui_cts_loss)
-        loss = mf_loss + self.reg_weight * reg_loss + 0.01 * (cts_loss + e_cts_loss + ui_cts_loss) 
+        loss = mf_loss + self.reg_weight * reg_loss + 0.01 * (cts_loss + e_cts_loss + ui_cts_loss + ui_cts_loss_2) 
         return loss
 
     def calculate_kg_loss(self, interaction):
