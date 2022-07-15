@@ -70,6 +70,18 @@ class Aggregator(nn.Module):
 
         return ego_embeddings
 
+class Similarity(nn.Module):
+    """
+    Dot product or cosine similarity
+    """
+
+    def __init__(self, temp):
+        super().__init__()
+        self.temp = temp
+        self.cos = nn.CosineSimilarity(dim=-1)
+
+    def forward(self, x, y):
+        return self.cos(x, y) / 1
 
 class KGAT(KnowledgeRecommender):
     r"""KGAT is a knowledge-based recommendation model. It combines knowledge graph and the user-item interaction
@@ -131,6 +143,7 @@ class KGAT(KnowledgeRecommender):
         # parameters initialization
         self.apply(xavier_normal_initialization)
         self.other_parameter_name = ['restore_user_e', 'restore_entity_e']
+        self.cos = Similarity(temp=1)
 
     def init_graph(self):
         r"""Get the initial attention matrix through the collaborative knowledge graph
@@ -249,16 +262,19 @@ class KGAT(KnowledgeRecommender):
 
         loss = self.ce_loss(logits, labels)
         return loss
-
+    # cts_loss_2的三种写法
+    # 第一种是复刻DCLR的写法，但是sim矩阵就是用的matmul然后加l2_norm（loss初始极小）
+    # 第二种也是复刻DCLR的写法，但是基本是完全复刻，但sim矩阵用的是cos向量（loss初始极小）
+    # 第三种写法是根据咱们的cts_loss仿写的，只是把原来的从sim矩阵中拿负样本变成了直接随机生成负样本（loss正常，但是训练到70 80轮后，收敛至0了）
     def cts_loss_2(self, z_i, z_j, temp, batch_size):  # B * D    B * D
         N = 2 * batch_size
-
+        z_i = F.normalize(z_i, p=2, dim=1)
+        z_j = F.normalize(z_j, p=2, dim=1)
         z = torch.cat((z_i, z_j), dim=0)  # 2B * D
 
         # 这一步是矩阵相乘得到一个相似度
         sim = torch.mm(z, z.T) / temp  # 2B * 2B
         labels = torch.arange(sim.size(0)).long().to(sim.device)
-
 
         batch_size, hidden_size = z.size()
 
@@ -267,27 +283,123 @@ class KGAT(KnowledgeRecommender):
                                  device=z.device)  # * variation + avg
         z_negative.requires_grad = True
 
-
         # cos_sim = cls.sim(z1.unsqueeze(1), z2.unsqueeze(0))
 
         sim_negative = torch.mm(z, z_negative.T) / temp
         sim = torch.cat([sim, sim_negative], 1)
 
-
         # labels_digits
         labels_dis = torch.cat(
             [torch.eye(sim.size(0), device=sim.device)[labels], torch.zeros_like(sim_negative)], -1)
         # DCLR中model_args.phi默认设为了0.85 （281这行代码不确定,原文中用的是sim_fix）
-        weights = torch.where(sim > 0.85, 0, 1)
+        weights = torch.where(sim > 0.85 * 20, 0, 1)
 
         mask_weights = torch.eye(sim.size(0), device=sim.device) - torch.diag_embed(torch.diag(weights))
         weights = weights + torch.cat([mask_weights, torch.zeros_like(sim_negative)], -1)
         soft_cos_sim = torch.softmax(sim * weights, -1)
         loss = - (labels_dis * torch.log(soft_cos_sim) + (1 - labels_dis) * torch.log(1 - soft_cos_sim))
         loss = torch.mean(loss)
+        print("loss", loss)
+        return loss
+    
+    
+    def cts_loss_2(self, z_i, z_j, temp, batch_size):  # B * D    B * D
+        batch_size, hidden_size = z_i.size()  # batch size = B, hidden_size = D
+
+        # z = torch.cat((z_i, z_j), dim=0)  # N * D
+
+        # 这一步是矩阵相乘得到一个相似度
+
+        cos_sim = self.cos(z_i.unsqueeze(1), z_j.unsqueeze(0))  # N * N
+        labels = torch.arange(cos_sim.size(0)).long().to(cos_sim.device)  # N
+
+        # print("cts_2.labels.shape", labels.shape)
+
+        # DCLR中noise_times默认设成了1
+        z_negative = torch.randn([int(batch_size * 1), hidden_size],  # N * D
+                                 device=z_j.device)  # * variation + avg
+        z_negative.requires_grad = True
+
+        print("z_negative", z_negative.shape)
+
+        # cos_sim = cls.sim(z1.unsqueeze(1), z2.unsqueeze(0))
+
+        cos_sim_negative = self.cos(z_i.unsqueeze(1), z_negative.unsqueeze(0))
+        cos_sim = torch.cat([cos_sim, cos_sim_negative], 1)
+
+        # labels_digits
+        labels_dis = torch.cat(
+            [torch.eye(cos_sim.size(0), device=cos_sim.device)[labels], torch.zeros_like(cos_sim_negative)], -1)
+        # print("label_dis", labels_dis)
+        print("label_dis.shape", labels_dis.shape)
+
+        weights = torch.where(cos_sim > 0.85 * 20, 0, 1)
+        mask_weights = torch.eye(cos_sim.size(0), device=cos_sim.device) - torch.diag_embed(torch.diag(weights))
+        weights = weights + torch.cat([mask_weights, torch.zeros_like(cos_sim_negative)], -1)
+        soft_cos_sim = torch.softmax(cos_sim * weights, -1)
+        loss = - (labels_dis * torch.log(soft_cos_sim) + (1 - labels_dis) * torch.log(1 - soft_cos_sim))
+        loss = torch.mean(loss)
+        print("loss", loss)
+        return loss
+    
+    def cts_loss_2(self, z_i, z_j, temp, batch_size):  # B * D    B * D
+        N = 2 * batch_size
+        # z_i = F.normalize(z_i, p=2, dim=1)
+        # z_j = F.normalize(z_j, p=2, dim=1)
+        z = torch.cat((z_i, z_j), dim=0)  # 2B * D
+
+        # 这一步是矩阵相乘得到一个相似度
+        sim = torch.mm(z, z.T) / temp  # 2B * 2B
+        # labels = torch.arange(sim.size(0)).long().to(sim.device)  # 2B
+
+        # print("labels", labels)
+
+        sim_i_j = torch.diag(sim, batch_size)  # B*1
+        sim_j_i = torch.diag(sim, -batch_size)  # B*1
+
+        positive_samples = torch.cat((sim_i_j, sim_j_i), dim=0).reshape(N, 1)  # 2B * 1
+        # print("positive_samples", positive_samples)
+        # print("positive_samples.min", positive_samples.min())
+
+        batch_size, hidden_size = z.size()
+
+        # DCLR中noise_times默认设成了1
+        # z_negative = torch.randn([int(batch_size * 1), hidden_size],
+        # device=z.device)  # * variation + avg  # 2B * D
+        # z_negative.requires_grad = True
+
+        # cos_sim = cls.sim(z1.unsqueeze(1), z2.unsqueeze(0))
+
+        sim_negative = torch.randn([int(batch_size * 1), int(batch_size * 1)],
+                                   device=z.device)  # 2B * 2B
+
+        sim = torch.cat([positive_samples, sim_negative], 1)  # 2B * 2B + 1
+
+        # print("torch.eye(sim.size(0))", torch.diag(torch.eye(sim.size(0))))
+        # print("torch.eye(sim.size(0))[labels]", torch.eye(sim.size(0))[labels])
+
+        # labels_digits
+        # labels_dis = torch.cat(
+        # [torch.diag(torch.eye(sim.size(0), device=sim.device)).reshape(N, 1), torch.zeros_like(sim_negative)], -1)  # 2B * 2B + 1
+
+        # print("labels_dis.shape", labels_dis.shape)
+        # DCLR中model_args.phi默认设为了0.85 （281这行代码不确定,原文中用的是sim_fix）
+        # weights = torch.where(sim > 0.85, 0, 1)  # 2B * 2B + 1
+
+        # mask_weights = torch.diag(torch.eye(sim.size(0), device=sim.device)).reshape(N, 1) - torch.diag(weights).reshape(N, 1)    # 2B * 1
+        # weights = weights + torch.cat([mask_weights, torch.zeros_like(sim_negative)], -1)     # 2B * 2B + 1
+        # 本来是sim * weights
+        # soft_cos_sim = torch.softmax(sim, -1)    #  2B * 2B + 1
+
+        labels = torch.zeros(N).to(positive_samples.device).long()
+
+        loss = self.ce_loss(sim, labels)
+
+        print("loss", loss)
 
         return loss
-
+    
+    
     def projection_head_map(self, state, mode):
         for i, l in enumerate(self.projection_head): # 0: Linear 1: BN (relu)  2: Linear 3:BN (relu)
             if i % 2 != 0:
